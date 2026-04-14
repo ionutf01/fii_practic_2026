@@ -828,10 +828,11 @@ resource "aws_launch_template" "nc_dr_lt_primary" {
     mkdir -p /home/ec2-user/app
     cat << 'PY_EOF' > /home/ec2-user/app/app.py
     ${templatefile("${path.module}/app.py.tftpl", {
-    bucket_name = aws_s3_bucket.nc_dr_s3_primary.bucket,
-    table_name  = var.dynamodb_table_name,
-    aws_region  = data.aws_region.nc_dr_primary.name,
-    image_key   = var.background_image_key
+    bucket_name      = aws_s3_bucket.nc_dr_s3_primary.bucket,
+    table_name       = var.dynamodb_table_name,
+    aws_region       = data.aws_region.nc_dr_primary.name,
+    image_key        = var.background_image_key,
+    bedrock_model_id = var.bedrock_model_id
 })}
     PY_EOF
     cat <<SVC_EOF > /etc/systemd/system/cloudpulse.service
@@ -903,10 +904,11 @@ resource "aws_launch_template" "nc_dr_lt_secondary" {
     mkdir -p /home/ec2-user/app
     cat << 'PY_EOF' > /home/ec2-user/app/app.py
     ${templatefile("${path.module}/app.py.tftpl", {
-    bucket_name = aws_s3_bucket.nc_dr_s3_secondary.bucket,
-    table_name  = var.dynamodb_table_name,
-    aws_region  = data.aws_region.nc_dr_secondary_region.name,
-    image_key   = var.background_image_key
+    bucket_name      = aws_s3_bucket.nc_dr_s3_secondary.bucket,
+    table_name       = var.dynamodb_table_name,
+    aws_region       = data.aws_region.nc_dr_secondary_region.name,
+    image_key        = var.background_image_key,
+    bedrock_model_id = var.bedrock_model_id
 })}
     PY_EOF
     cat <<SVC_EOF > /etc/systemd/system/cloudpulse.service
