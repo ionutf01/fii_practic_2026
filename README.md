@@ -84,7 +84,7 @@ In your forked GitHub repository:
 1. Go to Settings > Secrets and variables > Actions.
 2. Add the following secrets:
    - `ROLE_TO_ASSUME`: The ARN of the IAM role created in step 2.
-   - `AWS_REGION`: Region for the GitHub Actions AWS session (API calls are not limited to this region). Default workload regions: **`us-east-1`** Session 3 (`var.main_aws_region`, where Amazon Nova Lite lives), **`eu-west-2`** DR primary (`var.aws_region`), **`eu-west-3`** DR secondary (`var.dr_secondary_region`).
+   - `AWS_REGION`: Region for the GitHub Actions AWS session (API calls are not limited to this region). Default workload regions: **`eu-west-1`** Session 3 (`var.main_aws_region`), **`eu-west-2`** DR primary (`var.aws_region`), **`eu-west-3`** DR secondary (`var.dr_secondary_region`).
 
 ### 4. Create S3 Bucket for Terraform State
 
@@ -94,35 +94,12 @@ In your forked GitHub repository:
 
 2. In the `provider.tf` file, replace `YOUR_BUCKET_NAME` with your actual S3 bucket name.
 
-### 5. Grant Bedrock Nova Lite Access (one-time, manual)
-
-> ⚠️ **This is the single most common cause of broken labs.** The pipeline has a pre-check that will fail fast with a clear error if you skip this step, but it is still easier to just do it now.
-
-Bedrock requires every AWS account to accept a foundation model's EULA in the console before any API call will succeed. This cannot be automated by Terraform or IAM — it is a one-time click-through per account, per region, per model.
-
-1. Open the AWS Console and switch the region selector (top right) to **US East (N. Virginia) — `us-east-1`**.
-2. Go to **Amazon Bedrock** → **Model access** (left sidebar).
-3. Click **Modify model access** (or **Manage model access** depending on console version).
-4. Find **Amazon → Nova Lite** and tick the checkbox.
-5. Click **Next**, review, then **Submit**. Access is granted within seconds for Amazon's own models.
-6. The **Access status** column should now say **Access granted**.
-
-Verify (optional, from any shell with AWS credentials):
-
-```bash
-aws bedrock list-foundation-models --region us-east-1 \
-  --query "modelSummaries[?modelId=='amazon.nova-lite-v1:0'].modelLifecycle.status" \
-  --output text
-```
-
-Should print `ACTIVE`. If it prints anything else, wait a few seconds and retry.
-
-### 6. Modify the GitHub Actions Workflow
+### 5. Modify the GitHub Actions Workflow
 
 1. Open `.github/workflows/terraform.yml`.
-2. Uncomment all steps except the "Terraform Destroy" step (which should remain commented out for now). The `Terraform Apply` step is already uncommented in this repo.
+2. Uncomment all steps except the "Terraform Destroy" step (which should remain commented out for now).
 
-### 7. Commit and Push Changes
+### 6. Commit and Push Changes
 
 1. Add all changes:
 

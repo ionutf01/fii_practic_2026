@@ -134,44 +134,6 @@ resource "aws_security_group" "cloudpulse_sg" {
   tags = { Name = "${var.main_stack_name}-sg" }
 }
 
-# ============================================================
-# PHASE 2b: Bedrock Runtime VPC Interface Endpoint (Session 5)
-#
-# Private connectivity from the EC2 instance to Bedrock. With
-# private_dns_enabled = true, bedrock-runtime.<region>.amazonaws.com
-# resolves to a private IP inside the VPC, so traffic never traverses
-# the public internet — even though this instance has a public IP.
-# ============================================================
-
-resource "aws_security_group" "bedrock_endpoint_sg" {
-  provider    = aws.main
-  name        = "${var.main_stack_name}-bedrock-endpoint-sg"
-  description = "Allow HTTPS from CloudPulse instances to the Bedrock VPC endpoint"
-  vpc_id      = aws_vpc.cloudpulse.id
-
-  ingress {
-    description     = "HTTPS from CloudPulse instance SG"
-    from_port       = 443
-    to_port         = 443
-    protocol        = "tcp"
-    security_groups = [aws_security_group.cloudpulse_sg.id]
-  }
-
-  tags = { Name = "${var.main_stack_name}-bedrock-endpoint-sg" }
-}
-
-resource "aws_vpc_endpoint" "bedrock_runtime" {
-  provider            = aws.main
-  vpc_id              = aws_vpc.cloudpulse.id
-  service_name        = "com.amazonaws.${var.main_aws_region}.bedrock-runtime"
-  vpc_endpoint_type   = "Interface"
-  subnet_ids          = [aws_subnet.public.id]
-  security_group_ids  = [aws_security_group.bedrock_endpoint_sg.id]
-  private_dns_enabled = true
-
-  tags = { Name = "${var.main_stack_name}-bedrock-runtime-endpoint" }
-}
-
 resource "aws_s3_bucket" "cloudpulse" {
   provider = aws.main
   bucket   = "${var.main_s3_bucket_prefix}-${data.aws_caller_identity.current.account_id}-${data.aws_region.main.name}"
@@ -261,13 +223,6 @@ resource "aws_iam_role_policy" "cloudpulse_access" {
         Action = ["dynamodb:GetItem", "dynamodb:UpdateItem",
         "dynamodb:PutItem"]
         Resource = aws_dynamodb_table.cloudpulse.arn
-      },
-      {
-        Effect = "Allow"
-        Action = ["bedrock:InvokeModel"]
-        Resource = [
-          "arn:aws:bedrock:${var.main_aws_region}::foundation-model/${var.bedrock_model_id}"
-        ]
       }
     ]
   })
@@ -297,10 +252,7 @@ resource "aws_instance" "cloudpulse" {
   private_ip                  = "10.0.0.10"
   user_data_replace_on_change = true
 
-  depends_on = [
-    aws_iam_role_policy_attachment.cloudpulse_ec2_ssm_core,
-    aws_vpc_endpoint.bedrock_runtime,
-  ]
+  depends_on = [aws_iam_role_policy_attachment.cloudpulse_ec2_ssm_core]
 
   user_data = <<-EOF
     #!/bin/bash
@@ -313,18 +265,17 @@ resource "aws_instance" "cloudpulse" {
     # 1. Install App dependencies
     yum update -y
     yum install -y python3-pip unzip
-    pip3 install flask requests 'boto3>=1.35.0' pytz prometheus-flask-exporter
+    pip3 install flask requests boto3 pytz prometheus-flask-exporter
 
     mkdir -p /home/ec2-user/app
 
     # 2. Inject the Flask app
     cat << 'PY_EOF' > /home/ec2-user/app/app.py
     ${templatefile("${path.module}/app.py.tftpl", {
-  bucket_name      = aws_s3_bucket.cloudpulse.bucket,
-  table_name       = var.main_dynamodb_table_name,
-  aws_region       = var.main_aws_region,
-  image_key        = var.background_image_key,
-  bedrock_model_id = var.bedrock_model_id
+  bucket_name = aws_s3_bucket.cloudpulse.bucket,
+  table_name  = var.main_dynamodb_table_name,
+  aws_region  = var.main_aws_region,
+  image_key   = var.background_image_key
 })}
     PY_EOF
 

@@ -1,6 +1,6 @@
-from flask import Flask, render_template_string, Response, jsonify
+from flask import Flask, render_template_string, Response
 from prometheus_flask_exporter import PrometheusMetrics
-import requests, datetime, boto3, io, json, time, threading
+import requests, datetime, boto3, io
 from pytz import timezone
 
 app = Flask(__name__)
@@ -12,19 +12,10 @@ BUCKET_NAME = "${bucket_name}"
 TABLE_NAME  = "${table_name}"
 REGION      = "${aws_region}"
 IMAGE_KEY   = "${image_key}"
-MODEL_ID    = "${bedrock_model_id}"
 
 s3_client = boto3.client('s3', region_name=REGION)
 dynamodb  = boto3.resource('dynamodb', region_name=REGION)
-bedrock   = boto3.client('bedrock-runtime', region_name=REGION)
 table     = dynamodb.Table(TABLE_NAME)
-
-# 60-second in-process cache for /explain responses.
-# Purpose: the endpoint is public and every miss costs a Bedrock call.
-# A 60s TTL keeps per-student cost near zero and hides Bedrock latency.
-_explain_cache = {"ts": 0.0, "payload": None}
-_explain_lock  = threading.Lock()
-_EXPLAIN_TTL_SECONDS = 60
 
 def get_metadata(path):
     try:
@@ -34,64 +25,12 @@ def get_metadata(path):
             headers={"X-aws-ec2-metadata-token": token}, timeout=1).text
     except: return "Unknown"
 
-def _read_visit_count():
-    try:
-        item = table.get_item(Key={'id': 'visits'}).get('Item') or {}
-        return int(item.get('count', 0))
-    except Exception:
-        return 0
-
-def _ask_bedrock(iid, az, count):
-    prompt = (
-        "You are a senior cloud engineer mentoring a junior. "
-        "In 2-3 friendly sentences, explain what the following live status "
-        "of the CloudPulse app tells us. Be concrete and specific, not generic. "
-        "Do not start with 'Sure' or 'Here is'. Just explain.\n\n"
-        f"- Instance ID: {iid}\n"
-        f"- Availability Zone: {az}\n"
-        f"- Region: {REGION}\n"
-        f"- Total visits so far: {count}"
-    )
-    # Amazon Nova message schema: content is a list of content blocks,
-    # parameter is "maxTokens" (camelCase), not "max_tokens".
-    body = json.dumps({
-        "messages": [{"role": "user", "content": [{"text": prompt}]}],
-        "inferenceConfig": {"maxTokens": 200, "temperature": 0.3},
-    })
-    resp = bedrock.invoke_model(modelId=MODEL_ID, body=body)
-    result = json.loads(resp["body"].read())
-    return result["output"]["message"]["content"][0]["text"].strip()
-
 @app.route('/background-image')
 def bg():
     try:
         r = s3_client.get_object(Bucket=BUCKET_NAME, Key=IMAGE_KEY)
         return Response(r['Body'].read(), mimetype='image/jpeg')
     except Exception as e: return f"Error: {e}", 404
-
-@app.route('/explain')
-def explain():
-    now = time.time()
-    with _explain_lock:
-        cached = _explain_cache["payload"]
-        if cached and (now - _explain_cache["ts"]) < _EXPLAIN_TTL_SECONDS:
-            return jsonify({**cached, "cached": True})
-
-    iid   = get_metadata('instance-id')
-    az    = get_metadata('placement/availability-zone')
-    count = _read_visit_count()
-
-    try:
-        text = _ask_bedrock(iid, az, count)
-    except Exception as e:
-        # Never 500 on the dashboard — degrade gracefully.
-        return jsonify({"explanation": f"(AI insight unavailable: {type(e).__name__})", "cached": False}), 200
-
-    payload = {"explanation": text, "model": MODEL_ID, "instance": iid}
-    with _explain_lock:
-        _explain_cache["ts"]      = now
-        _explain_cache["payload"] = payload
-    return jsonify({**payload, "cached": False})
 
 @app.route('/')
 def index():
@@ -106,38 +45,20 @@ def index():
         count = resp['Attributes']['count']
     except: count = "Error"
     fmt = "%H:%M:%S"
-    ny  = datetime.datetime.now(timezone('America/New_York')).strftime(fmt)
+    ny = datetime.datetime.now(timezone('America/New_York')).strftime(fmt)
     ldn = datetime.datetime.now(timezone('Europe/London')).strftime(fmt)
     tky = datetime.datetime.now(timezone('Asia/Tokyo')).strftime(fmt)
     html = f"""<html><head><title>Cloud Pulse</title>
     <style>body{{font-family:sans-serif;background:url('/background-image') no-repeat center/cover fixed;color:#fff;text-align:center;margin:0}}
-    .box{{background:rgba(0,0,0,.85);display:inline-block;padding:40px;margin-top:80px;border-radius:20px;border:2px solid #ffa500;max-width:720px}}
+    .box{{background:rgba(0,0,0,.85);display:inline-block;padding:40px;margin-top:100px;border-radius:20px;border:2px solid #ffa500}}
     .clocks{{display:flex;gap:40px;margin:30px 0;justify-content:center}}.clock-item b{{color:#ffa500}}
-    .count{{font-size:28px;color:#ffa500;font-weight:bold;margin-top:20px}}
-    .ai{{margin-top:30px;padding:20px;border-top:1px dashed #ffa500;text-align:left}}
-    .ai-label{{color:#ffa500;font-weight:bold;font-size:14px;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px}}
-    .ai-text{{font-size:16px;line-height:1.5;color:#eee}}
-    .ai-meta{{font-size:11px;color:#888;margin-top:8px}}</style></head>
+    .count{{font-size:28px;color:#ffa500;font-weight:bold;margin-top:20px}}</style></head>
     <body><div class="box"><h1>Cloud Pulse</h1>
     <p><b>Instance:</b> {iid} | <b>Zone:</b> {az}</p><hr>
     <div class="clocks"><div class="clock-item"><b>New York</b><br>{ny}</div>
     <div class="clock-item"><b>London</b><br>{ldn}</div>
     <div class="clock-item"><b>Tokyo</b><br>{tky}</div></div>
-    <div class="count">Visitors: {count}</div>
-    <div class="ai"><div class="ai-label">AI Insight (Bedrock Nova Lite)</div>
-      <div class="ai-text" id="ai-text">Asking Bedrock...</div>
-      <div class="ai-meta" id="ai-meta"></div></div>
-    </div>
-    <script>
-    fetch('/explain').then(r => r.json()).then(d => {{
-      document.getElementById('ai-text').textContent = d.explanation;
-      document.getElementById('ai-meta').textContent =
-        (d.cached ? 'cached * ' : 'fresh * ') + (d.model || '');
-    }}).catch(e => {{
-      document.getElementById('ai-text').textContent = '(AI insight unavailable)';
-    }});
-    </script>
-    </body></html>"""
+    <div class="count">Visitors: {count}</div></div></body></html>"""
     return Response(html, mimetype='text/html', headers={
         'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0, s-maxage=0',
         'Surrogate-Control': 'no-store',

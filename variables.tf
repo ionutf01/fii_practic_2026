@@ -5,15 +5,9 @@ variable "aws_region" {
 }
 
 variable "main_aws_region" {
-  description = "Region for Session 3 stack (main.tf); wired as provider aws.main. Must be a region where Amazon Nova Lite is natively available: us-east-1, us-east-2, or us-west-2."
+  description = "Region for Session 3 stack (main.tf); wired as provider aws.main."
   type        = string
-  default     = "us-east-1"
-}
-
-variable "bedrock_model_id" {
-  description = "Bedrock foundation model ID used by the CloudPulse /explain endpoint. Default is Amazon Nova Lite, the cheapest Bedrock model. Requires var.main_aws_region to be one of: us-east-1, us-east-2, us-west-2. To swap models you must (a) grant model access in the Bedrock console and (b) update app.py.tftpl's request body if the model family differs."
-  type        = string
-  default     = "amazon.nova-lite-v1:0"
+  default     = "eu-west-1"
 }
 
 variable "dr_secondary_region" {
