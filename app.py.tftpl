@@ -1,4 +1,4 @@
-from flask import Flask, render_template_string, Response, jsonify
+from flask import Flask, render_template_string, Response, jsonify, request
 from prometheus_flask_exporter import PrometheusMetrics
 import requests, datetime, boto3, io, json, time, threading
 from pytz import timezone
@@ -20,12 +20,13 @@ dynamodb  = boto3.resource('dynamodb', region_name=REGION)
 bedrock   = boto3.client('bedrock-runtime', region_name=BEDROCK_REGION)
 table     = dynamodb.Table(TABLE_NAME)
 
-# 60-second in-process cache for /explain responses.
-# Purpose: the endpoint is public and every miss costs a Bedrock call.
-# A 60s TTL keeps per-student cost near zero and hides Bedrock latency.
-_explain_cache = {"ts": 0.0, "payload": None}
+# Per-question in-process cache for /explain responses.
+# Purpose: every miss costs a Bedrock call. A short TTL keeps per-student
+# cost near zero while allowing the same concept to be re-asked cheaply.
+_explain_cache = {}          # { question_lower: (ts, payload) }
 _explain_lock  = threading.Lock()
-_EXPLAIN_TTL_SECONDS = 60
+_EXPLAIN_TTL_SECONDS = 300
+_EXPLAIN_MAX_CHARS   = 150   # cap user input length
 
 def get_metadata(path):
     try:
@@ -42,22 +43,20 @@ def _read_visit_count():
     except Exception:
         return 0
 
-def _ask_bedrock(iid, az, count):
+def _ask_bedrock(concept):
     prompt = (
         "You are a senior cloud engineer mentoring a junior. "
-        "In 2-3 friendly sentences, explain what the following live status "
-        "of the CloudPulse app tells us. Be concrete and specific, not generic. "
+        "In 3-5 friendly sentences, clearly explain the following cloud / AWS / "
+        "DevOps concept. Be concrete and specific, not generic. Use plain language. "
+        "If the concept is unrelated to cloud/AWS/DevOps, still explain it briefly. "
         "Do not start with 'Sure' or 'Here is'. Just explain.\n\n"
-        f"- Instance ID: {iid}\n"
-        f"- Availability Zone: {az}\n"
-        f"- Region: {REGION}\n"
-        f"- Total visits so far: {count}"
+        f"Concept: {concept}"
     )
     # Amazon Nova message schema: content is a list of content blocks,
     # parameter is "maxTokens" (camelCase), not "max_tokens".
     body = json.dumps({
         "messages": [{"role": "user", "content": [{"text": prompt}]}],
-        "inferenceConfig": {"maxTokens": 200, "temperature": 0.3},
+        "inferenceConfig": {"maxTokens": 400, "temperature": 0.3},
     })
     resp = bedrock.invoke_model(modelId=MODEL_ID, body=body)
     result = json.loads(resp["body"].read())
@@ -74,29 +73,42 @@ def bg():
         return Response(r['Body'].read(), mimetype='image/jpeg')
     except Exception as e: return f"Error: {e}", 404
 
+def _no_store(resp):
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
 @app.route('/explain')
 def explain():
+    q = (request.args.get('q') or '').strip()
+    if not q:
+        return _no_store(jsonify({
+            "error": "Missing 'q' query parameter. Example: /explain?q=what+is+a+VPC"
+        })), 400
+    if len(q) > _EXPLAIN_MAX_CHARS:
+        return _no_store(jsonify({
+            "error": f"Question too long (max {_EXPLAIN_MAX_CHARS} chars)."
+        })), 400
+
+    key = q.lower()
     now = time.time()
     with _explain_lock:
-        cached = _explain_cache["payload"]
-        if cached and (now - _explain_cache["ts"]) < _EXPLAIN_TTL_SECONDS:
-            return jsonify({**cached, "cached": True})
-
-    iid   = get_metadata('instance-id')
-    az    = get_metadata('placement/availability-zone')
-    count = _read_visit_count()
+        entry = _explain_cache.get(key)
+        if entry and (now - entry[0]) < _EXPLAIN_TTL_SECONDS:
+            return _no_store(jsonify({**entry[1], "cached": True}))
 
     try:
-        text = _ask_bedrock(iid, az, count)
+        text = _ask_bedrock(q)
     except Exception as e:
         # Never 500 on the dashboard — degrade gracefully.
-        return jsonify({"explanation": f"(AI insight unavailable: {type(e).__name__})", "cached": False}), 200
+        return _no_store(jsonify({
+            "explanation": f"(AI insight unavailable: {type(e).__name__})",
+            "question": q, "cached": False
+        })), 200
 
-    payload = {"explanation": text, "model": MODEL_ID, "instance": iid}
+    payload = {"explanation": text, "model": MODEL_ID, "question": q}
     with _explain_lock:
-        _explain_cache["ts"]      = now
-        _explain_cache["payload"] = payload
-    return jsonify({**payload, "cached": False})
+        _explain_cache[key] = (now, payload)
+    return _no_store(jsonify({**payload, "cached": False}))
 
 @app.route('/')
 def index():
@@ -121,25 +133,50 @@ def index():
     .count{{font-size:28px;color:#ffa500;font-weight:bold;margin-top:20px}}
     .ai{{margin-top:30px;padding:20px;border-top:1px dashed #ffa500;text-align:left}}
     .ai-label{{color:#ffa500;font-weight:bold;font-size:14px;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px}}
-    .ai-text{{font-size:16px;line-height:1.5;color:#eee}}
-    .ai-meta{{font-size:11px;color:#888;margin-top:8px}}</style></head>
+    .ai-text{{font-size:16px;line-height:1.5;color:#eee;white-space:pre-wrap;min-height:24px}}
+    .ai-meta{{font-size:11px;color:#888;margin-top:8px}}
+    .ai-form{{display:flex;gap:8px;margin-bottom:12px}}
+    .ai-form input{{flex:1;padding:10px;border-radius:6px;border:1px solid #ffa500;background:#111;color:#fff;font-size:14px}}
+    .ai-form button{{padding:10px 18px;border-radius:6px;border:0;background:#ffa500;color:#000;font-weight:bold;cursor:pointer}}
+    .ai-form button:disabled{{opacity:.5;cursor:wait}}</style></head>
     <body><div class="box"><h1>Cloud Pulse</h1>
     <p><b>Instance:</b> {iid} | <b>Zone:</b> {az}</p><hr>
     <div class="clocks"><div class="clock-item"><b>New York</b><br>{ny}</div>
     <div class="clock-item"><b>London</b><br>{ldn}</div>
     <div class="clock-item"><b>Tokyo</b><br>{tky}</div></div>
     <div class="count">Visitors: {count}</div>
-    <div class="ai"><div class="ai-label">AI Insight (Bedrock Nova Lite)</div>
-      <div class="ai-text" id="ai-text">Asking Bedrock...</div>
-      <div class="ai-meta" id="ai-meta"></div></div>
+    <div class="ai">
+      <div class="ai-label">Ask Bedrock Nova Lite</div>
+      <form class="ai-form" id="ai-form">
+        <input id="ai-input" type="text" maxlength="150"
+               placeholder="e.g. What is a VPC endpoint?" autocomplete="off" required>
+        <button type="submit" id="ai-btn">Explain</button>
+      </form>
+      <div class="ai-text" id="ai-text">Ask a cloud/AWS concept above and hit Explain.</div>
+      <div class="ai-meta" id="ai-meta"></div>
+    </div>
     </div>
     <script>
-    fetch('/explain').then(r => r.json()).then(d => {{
-      document.getElementById('ai-text').textContent = d.explanation;
-      document.getElementById('ai-meta').textContent =
-        (d.cached ? 'cached * ' : 'fresh * ') + (d.model || '');
-    }}).catch(e => {{
-      document.getElementById('ai-text').textContent = '(AI insight unavailable)';
+    const form = document.getElementById('ai-form');
+    const input = document.getElementById('ai-input');
+    const btn = document.getElementById('ai-btn');
+    const textEl = document.getElementById('ai-text');
+    const metaEl = document.getElementById('ai-meta');
+    form.addEventListener('submit', (e) => {{
+      e.preventDefault();
+      const q = input.value.trim();
+      if (!q) return;
+      btn.disabled = true;
+      textEl.textContent = 'Asking Bedrock...';
+      metaEl.textContent = '';
+      fetch('/explain?q=' + encodeURIComponent(q), {{cache: 'no-store'}})
+        .then(r => r.json())
+        .then(d => {{
+          textEl.textContent = d.explanation || d.error || '(no response)';
+          metaEl.textContent = (d.cached ? 'cached * ' : 'fresh * ') + (d.model || '');
+        }})
+        .catch(() => {{ textEl.textContent = '(AI insight unavailable)'; }})
+        .finally(() => {{ btn.disabled = false; }});
     }});
     </script>
     </body></html>"""
